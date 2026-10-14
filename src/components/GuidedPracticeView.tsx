@@ -59,31 +59,45 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
   const engineRef = useRef<TypingEngine | null>(null);
   const timerIntervalRef = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const hiddenInputRef = useRef<HTMLInputElement>(null);
 
-  // Initialize or reconfigure engine when lesson or settings change
+  // Keep latest callbacks and settings in refs to avoid rebuilding engine on every render
+  const onKeyStatsUpdateRef = useRef(onKeyStatsUpdate);
+  onKeyStatsUpdateRef.current = onKeyStatsUpdate;
+
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  // Sync lesson if initialLesson changes
+  useEffect(() => {
+    setCurrentLesson(initialLesson);
+  }, [initialLesson.id]);
+
+  // Core setup function: instantiates TypingEngine
   const setupEngine = useCallback((lessonToUse: Lesson) => {
     if (timerIntervalRef.current) {
       window.clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
     }
 
+    const currentStrict = settingsRef.current.strictMode;
+    const currentBackspace = settingsRef.current.allowBackspace;
+
     const engine = new TypingEngine({
       targetSequence: lessonToUse.targetSequence,
-      mode: settings.strictMode ? 'strict' : 'relaxed',
-      allowBackspace: settings.allowBackspace,
+      mode: currentStrict ? 'strict' : 'relaxed',
+      allowBackspace: currentBackspace,
       onKeyAttempt: (char, isCorrect, rt) => {
         // Record per-key stats into persistent storage
         storage.updateKeyStat(char, isCorrect, rt);
-        onKeyStatsUpdate(storage.getKeyStatsMap());
+        onKeyStatsUpdateRef.current(storage.getKeyStatsMap());
       },
       onStateChange: (state) => {
         setEngineState(state);
       },
       onComplete: (res) => {
         setCompletedResult(res);
-        // Play success chime
-        if (settings.soundEnabled) soundEngine.playSuccess();
-        // Fire confetti
+        if (settingsRef.current.soundEnabled) soundEngine.playSuccess();
         try {
           confetti({
             particleCount: 80,
@@ -92,7 +106,6 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
           });
         } catch {}
 
-        // Save progress to storage
         let stars = 1;
         if (res.accuracy >= 95 && res.netWpm >= (lessonToUse.targetWpm || 25)) stars = 3;
         else if (res.accuracy >= 90) stars = 2;
@@ -123,8 +136,9 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
     });
     setCompletedResult(null);
     setErrorMessage(null);
-  }, [settings.strictMode, settings.allowBackspace, settings.soundEnabled, onKeyStatsUpdate]);
+  }, []); // Note: Zero volatile dependencies here! Stable engine lifecycle.
 
+  // Run setupEngine ONLY when lesson ID or targetSequence changes
   useEffect(() => {
     setupEngine(currentLesson);
     return () => {
@@ -132,9 +146,9 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
         window.clearInterval(timerIntervalRef.current);
       }
     };
-  }, [currentLesson, setupEngine]);
+  }, [currentLesson.id, currentLesson.targetSequence, setupEngine]);
 
-  // Periodic stats updater while running
+  // Periodic stats ticker while engine is actively running
   useEffect(() => {
     if (engineState === 'running') {
       timerIntervalRef.current = window.setInterval(() => {
@@ -165,64 +179,31 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
     };
   }, [engineState]);
 
-  // Global keyboard input listener
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent) => {
+  // Unified character processor for both physical keydown and virtual keyboard clicks
+  const processKeyInput = useCallback(
+    (inputKey: string, isRepeat: boolean = false) => {
       if (!engineRef.current) return;
       if (engineState === 'completed') return;
 
-      // Handle pause/resume with Escape
-      if (e.key === 'Escape') {
-        if (engineState === 'paused') {
-          engineRef.current.resume();
-        } else if (engineState === 'running') {
-          engineRef.current.pause();
-        }
-        return;
-      }
-
-      // Handle restart with Tab+Enter or Alt+R
-      if (e.altKey && e.key.toLowerCase() === 'r') {
-        e.preventDefault();
-        setupEngine(currentLesson);
-        return;
-      }
-
-      // Prevent scrolling on Space
-      if (e.key === ' ' && e.target === document.body) {
-        e.preventDefault();
-      }
-
-      // Ignore bare modifier keys
-      if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) {
-        return;
-      }
-
-      // Do not intercept browser shortcuts like Ctrl+R, Cmd+C, etc.
-      if (e.ctrlKey || e.metaKey) {
-        return;
-      }
-
-      // If user presses a key while paused, resume automatically
+      // Resume automatically if paused
       if (engineState === 'paused') {
         engineRef.current.resume();
       }
 
-      const inputChar = e.key;
-      const res = engineRef.current.handleKeyInput(inputChar, e.repeat);
+      const res = engineRef.current.handleKeyInput(inputKey, isRepeat);
 
-      // Audio feedback
       if (res.valid) {
-        if (settings.soundEnabled) {
+        const currentSettings = settingsRef.current;
+        if (currentSettings.soundEnabled) {
           if (res.isCorrect) {
-            soundEngine.playKey(inputChar === ' ');
-          } else if (settings.soundOnMistake) {
+            soundEngine.playKey(inputKey === ' ');
+          } else if (currentSettings.soundOnMistake) {
             soundEngine.playError();
           }
         }
 
-        // Animate virtual keyboard key
-        const info = getKeyInfoForChar(inputChar);
+        // Virtual key feedback
+        const info = getKeyInfoForChar(inputKey);
         if (info) {
           setLastPressed({
             code: info.code,
@@ -231,7 +212,10 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
           });
         }
 
-        setCurrentIndex(engineRef.current.getCurrentIndex());
+        // Sync fresh index and stats
+        const nextIdx = engineRef.current.getCurrentIndex();
+        setCurrentIndex(nextIdx);
+
         const updatedStats = engineRef.current.getStats();
         setStats({
           accuracy: updatedStats.accuracy,
@@ -244,31 +228,74 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
         });
 
         if (!res.isCorrect) {
-          setErrorMessage(`Expected '${res.targetChar === ' ' ? 'Space' : res.targetChar}', but pressed '${inputChar}'`);
+          setErrorMessage(
+            `Expected '${res.targetChar === ' ' ? 'Space' : res.targetChar}', but pressed '${inputKey === ' ' ? 'Space' : inputKey}'`
+          );
         } else {
           setErrorMessage(null);
         }
       }
     },
-    [engineState, settings.soundEnabled, settings.soundOnMistake, currentLesson, setupEngine]
+    [engineState]
   );
 
+  // Keyboard handler ref ensures listener never rebinds or drops strokes
+  const processKeyInputRef = useRef(processKeyInput);
+  processKeyInputRef.current = processKeyInput;
+
+  // Global window keydown listener
   useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (engineRef.current?.getState() === 'paused') {
+          engineRef.current.resume();
+        } else if (engineRef.current?.getState() === 'running') {
+          engineRef.current.pause();
+        }
+        return;
+      }
+
+      // Restart shortcut Alt+R
+      if (e.altKey && e.key.toLowerCase() === 'r') {
+        e.preventDefault();
+        setupEngine(currentLesson);
+        return;
+      }
+
+      // Prevent window scroll on Space
+      if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+      }
+
+      // Ignore bare modifiers
+      if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) {
+        return;
+      }
+
+      // Do not intercept browser shortcuts like Ctrl+R, Cmd+C
+      if (e.ctrlKey || e.metaKey) {
+        return;
+      }
+
+      processKeyInputRef.current(e.key, e.repeat);
+    };
+
     window.addEventListener('keydown', handleKeyDown);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [handleKeyDown]);
+  }, [currentLesson, setupEngine]);
 
   const targetChar = engineRef.current ? engineRef.current.getTargetChar() : '';
   const targetKeyInfo = targetChar ? getKeyInfoForChar(targetChar) : null;
   const activeFinger: FingerName | null = targetKeyInfo?.finger || null;
 
-  // Next lesson finding
+  // Next lesson calculation
   const currentIdxInCurriculum = CURRICULUM_LESSONS.findIndex((l) => l.id === currentLesson.id);
-  const nextLesson = currentIdxInCurriculum >= 0 && currentIdxInCurriculum < CURRICULUM_LESSONS.length - 1
-    ? CURRICULUM_LESSONS[currentIdxInCurriculum + 1]
-    : null;
+  const nextLesson =
+    currentIdxInCurriculum >= 0 && currentIdxInCurriculum < CURRICULUM_LESSONS.length - 1
+      ? CURRICULUM_LESSONS[currentIdxInCurriculum + 1]
+      : null;
 
   const handleNextLesson = () => {
     if (nextLesson) {
@@ -278,17 +305,42 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
     }
   };
 
+  const focusPractice = () => {
+    if (hiddenInputRef.current) {
+      hiddenInputRef.current.focus();
+    }
+  };
+
   return (
-    <div ref={containerRef} className="w-full max-w-5xl mx-auto px-4 py-4 md:py-6 flex flex-col gap-5">
+    <div
+      ref={containerRef}
+      onClick={focusPractice}
+      className="w-full max-w-5xl mx-auto px-4 py-4 md:py-6 flex flex-col gap-5 select-none"
+    >
+      {/* Hidden input for mobile focus & virtual keyboards */}
+      <input
+        ref={hiddenInputRef}
+        type="text"
+        className="absolute opacity-0 pointer-events-none w-0 h-0"
+        value=""
+        onChange={(e) => {
+          if (e.target.value) {
+            processKeyInput(e.target.value.slice(-1));
+          }
+        }}
+      />
+
       {/* HEADER / LESSON TITLE BAR */}
-      <div className={`flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl border ${
-        isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-200'
-      }`}>
+      <div
+        className={`flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl border ${
+          isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-200'
+        }`}
+      >
         <div className="flex flex-col">
           <div className="flex items-center gap-2 text-xs text-slate-400">
             <span className="uppercase tracking-wider font-semibold text-cyan-400">{currentLesson.category}</span>
             <span>·</span>
-            <span>Difficulty: {currentLesson.difficulty}</span>
+            <span className="capitalize text-slate-400">{currentLesson.difficulty}</span>
             {currentLesson.targetWpm && (
               <>
                 <span>·</span>
@@ -306,7 +358,10 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
         <div className="flex items-center gap-2">
           {engineState === 'running' ? (
             <button
-              onClick={() => engineRef.current?.pause()}
+              onClick={(e) => {
+                e.stopPropagation();
+                engineRef.current?.pause();
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-700 hover:bg-slate-800 transition-colors"
             >
               <Pause size={14} />
@@ -314,7 +369,10 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
             </button>
           ) : engineState === 'paused' ? (
             <button
-              onClick={() => engineRef.current?.resume()}
+              onClick={(e) => {
+                e.stopPropagation();
+                engineRef.current?.resume();
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30 transition-colors"
             >
               <Play size={14} />
@@ -323,7 +381,10 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
           ) : null}
 
           <button
-            onClick={() => setupEngine(currentLesson)}
+            onClick={(e) => {
+              e.stopPropagation();
+              setupEngine(currentLesson);
+            }}
             title="Restart Lesson (Alt+R)"
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-700 hover:bg-slate-800 transition-colors"
           >
@@ -332,7 +393,10 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
           </button>
 
           <button
-            onClick={onNavigateToLessons}
+            onClick={(e) => {
+              e.stopPropagation();
+              onNavigateToLessons();
+            }}
             className="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
           >
             All Lessons
@@ -342,21 +406,27 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
 
       {/* METRICS STRIP */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className={`p-3 rounded-xl border flex items-center gap-3 ${
-          isDark ? 'bg-slate-900/40 border-slate-800' : 'bg-slate-50 border-slate-200'
-        }`}>
+        <div
+          className={`p-3 rounded-xl border flex items-center gap-3 ${
+            isDark ? 'bg-slate-900/40 border-slate-800' : 'bg-slate-50 border-slate-200'
+          }`}
+        >
           <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400">
             <Zap size={18} />
           </div>
           <div>
             <div className="text-xs text-slate-400">Net Speed</div>
-            <div className="text-xl font-bold font-mono tabular-nums">{stats.netWpm} <span className="text-xs font-sans font-normal text-slate-500">WPM</span></div>
+            <div className="text-xl font-bold font-mono tabular-nums">
+              {stats.netWpm} <span className="text-xs font-sans font-normal text-slate-500">WPM</span>
+            </div>
           </div>
         </div>
 
-        <div className={`p-3 rounded-xl border flex items-center gap-3 ${
-          isDark ? 'bg-slate-900/40 border-slate-800' : 'bg-slate-50 border-slate-200'
-        }`}>
+        <div
+          className={`p-3 rounded-xl border flex items-center gap-3 ${
+            isDark ? 'bg-slate-900/40 border-slate-800' : 'bg-slate-50 border-slate-200'
+          }`}
+        >
           <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400">
             <Target size={18} />
           </div>
@@ -366,9 +436,11 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
           </div>
         </div>
 
-        <div className={`p-3 rounded-xl border flex items-center gap-3 ${
-          isDark ? 'bg-slate-900/40 border-slate-800' : 'bg-slate-50 border-slate-200'
-        }`}>
+        <div
+          className={`p-3 rounded-xl border flex items-center gap-3 ${
+            isDark ? 'bg-slate-900/40 border-slate-800' : 'bg-slate-50 border-slate-200'
+          }`}
+        >
           <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400">
             <Clock size={18} />
           </div>
@@ -378,9 +450,11 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
           </div>
         </div>
 
-        <div className={`p-3 rounded-xl border flex items-center gap-3 ${
-          isDark ? 'bg-slate-900/40 border-slate-800' : 'bg-slate-50 border-slate-200'
-        }`}>
+        <div
+          className={`p-3 rounded-xl border flex items-center gap-3 ${
+            isDark ? 'bg-slate-900/40 border-slate-800' : 'bg-slate-50 border-slate-200'
+          }`}
+        >
           <div className="p-2 rounded-lg bg-rose-500/10 text-rose-400">
             <ShieldAlert size={18} />
           </div>
@@ -392,9 +466,11 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
       </div>
 
       {/* TYPING WORKSPACE VIEWPORT */}
-      <div className={`relative p-6 md:p-8 rounded-2xl border flex flex-col items-center justify-center transition-all ${
-        isDark ? 'bg-slate-900/80 border-slate-800 shadow-xl' : 'bg-white border-slate-300 shadow-md'
-      }`}>
+      <div
+        className={`relative p-6 md:p-8 rounded-2xl border flex flex-col items-center justify-center transition-all ${
+          isDark ? 'bg-slate-900/80 border-slate-800 shadow-xl' : 'bg-white border-slate-300 shadow-md'
+        }`}
+      >
         {/* Progress bar line */}
         <div className="w-full bg-slate-800/80 h-1.5 rounded-full overflow-hidden mb-6">
           <div
@@ -422,7 +498,11 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
                   }`}
                 >
                   {char === ' ' ? (
-                    <span className={`inline-block min-w-[12px] opacity-60 ${isCurrent ? 'underline underline-offset-4 decoration-cyan-400' : ''}`}>
+                    <span
+                      className={`inline-block min-w-[12px] opacity-60 ${
+                        isCurrent ? 'underline underline-offset-4 decoration-cyan-400' : ''
+                      }`}
+                    >
                       ␣
                     </span>
                   ) : (
@@ -470,7 +550,10 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
             <div className="text-xl font-bold text-slate-200">Session Paused</div>
             <p className="text-xs text-slate-400">Press any key or click below to resume typing</p>
             <button
-              onClick={() => engineRef.current?.resume()}
+              onClick={(e) => {
+                e.stopPropagation();
+                engineRef.current?.resume();
+              }}
               className="px-4 py-2 rounded-lg bg-cyan-400 text-slate-950 font-semibold text-xs hover:bg-cyan-300 transition-colors"
             >
               Resume Typing
@@ -480,9 +563,7 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
       </div>
 
       {/* HANDS ANATOMICAL GUIDE */}
-      {settings.showHands && (
-        <HandGuides activeFinger={activeFinger} theme={settings.theme} />
-      )}
+      {settings.showHands && <HandGuides activeFinger={activeFinger} theme={settings.theme} />}
 
       {/* VIRTUAL KEYBOARD */}
       <VirtualKeyboard
@@ -494,16 +575,18 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
         showFingerZones={settings.showFingerGuides}
         theme={settings.theme}
         onVirtualKeyPress={(char) => {
-          handleKeyDown(new KeyboardEvent('keydown', { key: char }));
+          processKeyInput(char);
         }}
       />
 
       {/* LESSON COMPLETED MODAL */}
       {completedResult && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className={`w-full max-w-md p-6 rounded-2xl border shadow-2xl flex flex-col items-center gap-5 ${
-            isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-300 text-slate-900'
-          }`}>
+          <div
+            className={`w-full max-w-md p-6 rounded-2xl border shadow-2xl flex flex-col items-center gap-5 ${
+              isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-300 text-slate-900'
+            }`}
+          >
             <div className="w-14 h-14 rounded-full bg-cyan-500/20 text-cyan-400 border border-cyan-500/40 flex items-center justify-center text-2xl shadow-lg shadow-cyan-500/20">
               🏆
             </div>
@@ -517,7 +600,9 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
             <div className="w-full grid grid-cols-2 gap-3">
               <div className="p-3 rounded-xl bg-slate-950/40 border border-slate-800 text-center">
                 <div className="text-xs text-slate-400">Net Speed</div>
-                <div className="text-2xl font-bold font-mono text-cyan-400">{completedResult.netWpm} <span className="text-xs text-slate-500 font-sans">WPM</span></div>
+                <div className="text-2xl font-bold font-mono text-cyan-400">
+                  {completedResult.netWpm} <span className="text-xs text-slate-500 font-sans">WPM</span>
+                </div>
                 <div className="text-[10px] text-slate-500">Gross: {completedResult.grossWpm} WPM</div>
               </div>
 
@@ -534,7 +619,10 @@ export const GuidedPracticeView: React.FC<GuidedPracticeViewProps> = ({
                 <div className="font-semibold text-rose-300 mb-1">Mistakes to review:</div>
                 <div className="flex flex-wrap gap-1.5">
                   {Object.entries(completedResult.mistakesByTarget).map(([char, count]) => (
-                    <span key={char} className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-mono">
+                    <span
+                      key={char}
+                      className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-mono"
+                    >
                       '{char === ' ' ? 'Space' : char}': {count}x
                     </span>
                   ))}

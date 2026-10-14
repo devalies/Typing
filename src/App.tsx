@@ -52,6 +52,11 @@ export default function App() {
     setStreakInfo(storage.getStreakInfo());
   }, []);
 
+  const handleKeyStatsUpdate = useCallback((newStats: Record<string, KeyStats>) => {
+    setStatsMap(newStats);
+    setStreakInfo(storage.getStreakInfo());
+  }, []);
+
   const handleUpdateSettings = (newSettings: UserSettings) => {
     setSettings(newSettings);
     storage.saveSettings(newSettings);
@@ -108,10 +113,7 @@ export default function App() {
             initialLesson={activePracticeLesson}
             settings={settings}
             statsMap={statsMap}
-            onKeyStatsUpdate={(newStats) => {
-              setStatsMap(newStats);
-              setStreakInfo(storage.getStreakInfo());
-            }}
+            onKeyStatsUpdate={handleKeyStatsUpdate}
             onNavigateToLessons={() => setCurrentTab('lessons')}
             onStartWeakDrill={handleStartWeakDrill}
           />
