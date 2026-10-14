@@ -1,0 +1,6 @@
+{
+  "name": "KeyCraft: Touch Typing Tutor & Speed Test",
+  "description": "Master touch typing, elevate your WPM, fix weak keys, and take speed tests with an interactive virtual mechanical keyboard and real-time analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
